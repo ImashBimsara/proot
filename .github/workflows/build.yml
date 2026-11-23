@@ -1,0 +1,78 @@
+name: Build PRoot for Android ARM64
+
+on:
+  push:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build-proot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout PRoot Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make wget curl unzip file binutils
+
+      - name: Download Android NDK r25c
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+          unzip -q android-ndk-r25c-linux.zip
+          echo "NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r25c" >> $GITHUB_ENV
+
+      - name: Download and Extract ARM64 libtalloc
+        run: |
+          mkdir -p sysroot
+          BASE_URL="http://ftp.debian.org/debian/pool/main/t/talloc"
+          TALLOC_DEB=$(curl -sL "$BASE_URL/" | grep -oE 'libtalloc2_[^"]+_arm64\.deb' | sort -V | tail -n 1)
+          TALLOC_DEV_DEB=$(curl -sL "$BASE_URL/" | grep -oE 'libtalloc-dev_[^"]+_arm64\.deb' | sort -V | tail -n 1)
+
+          wget -q "$BASE_URL/$TALLOC_DEB" "$BASE_URL/$TALLOC_DEV_DEB"
+          dpkg-deb -x "$TALLOC_DEB" sysroot/
+          dpkg-deb -x "$TALLOC_DEV_DEB" sysroot/
+
+          # Ensure libtalloc.so symlink points to the extracted shared library
+          cd sysroot/usr/lib/aarch64-linux-gnu
+          ln -sf $(ls libtalloc.so.2.* | head -n 1) libtalloc.so
+
+      - name: Cross-Compile PRoot for ARM64
+        run: |
+          TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          SYSROOT="$GITHUB_WORKSPACE/sysroot"
+
+          export CC="$TOOLCHAIN/aarch64-linux-android24-clang"
+          export LD="$TOOLCHAIN/aarch64-linux-android24-clang"
+          export STRIP="$TOOLCHAIN/llvm-strip"
+          export OBJCOPY="$TOOLCHAIN/llvm-objcopy"
+          export OBJDUMP="$TOOLCHAIN/llvm-objdump"
+
+          export CFLAGS="-O3 -fPIE -I$SYSROOT/usr/include -DARG_MAX=131072"
+          export LDFLAGS="-pie -L$SYSROOT/usr/lib/aarch64-linux-gnu -ltalloc"
+
+          make -C src clean
+          make -C src proot \
+            CC="$CC" \
+            LD="$LD" \
+            STRIP="$STRIP" \
+            OBJCOPY="$OBJCOPY" \
+            OBJDUMP="$OBJDUMP" \
+            HAS_LOADER_32BIT="" \
+            CFLAGS="$CFLAGS" \
+            LDFLAGS="$LDFLAGS"
+
+          mkdir -p output
+          cp src/proot output/libproot.so
+          cp -L "$SYSROOT/usr/lib/aarch64-linux-gnu/libtalloc.so.2" output/libtalloc.so.2
+          file output/libproot.so
+
+      - name: Upload Compiled Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: proot-android-arm64
+          path: |
+            output/libproot.so
+            output/libtalloc.so.2
